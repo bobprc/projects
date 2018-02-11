@@ -1,9 +1,12 @@
 #include <cmath>
-
+#include <iostream>
+#include <thrust/sort.h>
+#include <thrust/device_vector.h>
+#include <thrust/device_vector.h>
 
 __device__ __forceinline__ int elim_idx(int x, int y, int n_bxs)
 {
-  return x*n_bxs - (x*(x-1))/2 + y - 1;
+  return x*n_bxs - (x*(x+3))/2 + y - 1;
 }
 
 __global__ void nms_kern(float* boxes, int* elims, int* mask,
@@ -12,17 +15,16 @@ __global__ void nms_kern(float* boxes, int* elims, int* mask,
 
   int idx = threadIdx.x + blockDim.x * blockIdx.x;
 
-  if(idx >= (n_bxs *  (n_bxs - 1))/2)
-  {
+  if(idx >= (n_bxs*(n_bxs-1))/2)
     return;
-  }
 
-  int box_x_idx = n_bxs - static_cast<int>(sqrt((n-1/2)*(n-1/2)-2*idx));
-  int box_y_idx = idx + 1 + (box_x_idx * (box_x_idx+1))/2 - box_x_idx * (n_bxs-1);
+
+  int box_x_idx = n_bxs - static_cast<int>(ceil(0.5 + sqrtf((n_bxs-0.5)*(n_bxs-0.5)-2*idx)));
+  int box_y_idx = idx + 1 - (n_bxs-1)*box_x_idx + ((box_x_idx+1)*box_x_idx)/2;
 
   float box_x[4], box_y[4];
 
-  for(int i=0; i<4; i++)
+  for(int i=0; i<4; ++i)
   {
     box_x[i] = boxes[box_x_idx*4 + i];
     box_y[i] = boxes[box_y_idx*4 + i];
@@ -40,54 +42,43 @@ __global__ void nms_kern(float* boxes, int* elims, int* mask,
 
   float iou = delta_x * delta_y / (uni - delta_x * delta_y);
 
-  if(iou < thresh)
-  {
-    elims[idx] = 1;
-  }
+ 
+  elims[idx] = (iou > thresh) ? 0 : 1;
 
   __syncthreads();
 
-  if(box_x_idx != 0)
-  {
+  if(box_x_idx != 0) 
     return;
-  }
 
-  int col = 0, row = 0;
+
+  int col = 0;
   while(col < box_y_idx)
   {
     mask[box_y_idx] *= elims[elim_idx(col, box_y_idx, n_bxs)];
-    while(row + col < n_bxs - 1)
-    {
-      if(mask[row + col + 1] == 0)
-      {
-        row += 1;
-      }
-      else
-      {
-        break;
-      }
-    }
-    col += row + 1;
-    row = 0;
+    __syncthreads();
+    ++col;
+    while(col < n_bxs - 1 && mask[col] == 0)
+      ++col;
   }
 
 }
 
-void nms_cuda(float* boxes, int* elims, int* mask, float thresh,
-            int n_boxes, cudaStream_t stream)
+thrust::host_vector<int> nms_cuda(thrust::host_vector<float> &cpu_boxes, float thresh, int n_boxes)
 {
-cudaError_t err;
-int blocks_per_dim = n_boxes / 12 + 1;
-dim3 blocks(blocks_per_dim, blocks_per_dim);
-dim3 threadsPerBlock(12, 12);
-nms_kern<<<blocks, threadsPerBlock, 0, stream>>>(boxes, elims, mask,
-                                                 thresh, n_boxes);
-err = cudaGetLastError();
-if (err != cudaSuccess)
-{
-  fprintf(stderr, "CUDA kernel failed : %s\n", cudaGetErrorString(err));
-  exit(-1);
-}
-}
-
+  cudaError_t err;
+  thrust::device_vector<float> boxes = cpu_boxes;
+  thrust::device_vector<int> mask(n_boxes, 1);
+  thrust::device_vector<int> elims((n_boxes*(n_boxes-1))/2, 1);
+  nms_kern<<<n_boxes, n_boxes>>>(thrust::raw_pointer_cast(boxes.data()),
+                                        thrust::raw_pointer_cast(elims.data()), 
+                                        thrust::raw_pointer_cast(mask.data()),
+                                        thresh, n_boxes);
+  err = cudaGetLastError();
+  if (err != cudaSuccess)
+  {
+    fprintf(stderr, "CUDA kernel failed : %s\n", cudaGetErrorString(err));
+    exit(-1);
+  }
+  thrust::host_vector<int> output = mask;
+  return output;
 }

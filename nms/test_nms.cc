@@ -1,6 +1,8 @@
 #include <iostream>
+#include <algorithm>
 #include <vector>
 #include <random>
+#include <thrust/host_vector.h>
 
 using namespace std;
 
@@ -8,13 +10,17 @@ vector<int> nms(const vector<vector<float>>&,
                 const vector<float>&,
                 const float);
 
+thrust::host_vector<int> nms_cuda(thrust::host_vector<float> &boxes,
+                                  float thresh, int n_boxes);
+
 int main()
 {
+  int nps = 10;
   vector<vector<float>> boxes;
   vector<float> scores;
   default_random_engine e1(0);
   normal_distribution<float> jitter(0, 10);
-  for(int i=0; i<10; ++i)
+  for(int i=0; i<nps; ++i)
   {
     vector<float> box{150 + jitter(e1),
                       200 + jitter(e1),
@@ -23,7 +29,7 @@ int main()
     boxes.push_back(box);
     scores.push_back(jitter(e1));
   }
-  for(int i=0; i<10; ++i)
+  for(int i=0; i<nps; ++i)
   {
     vector<float> box{1000 + jitter(e1),
                       560 + jitter(e1),
@@ -32,7 +38,7 @@ int main()
     boxes.push_back(box);
     scores.push_back(jitter(e1));
   }
-  for(int i=0; i<10; ++i)
+  for(int i=0; i<nps; ++i)
   {
     vector<float> box{100 + jitter(e1),
                       2000 + jitter(e1),
@@ -46,4 +52,30 @@ int main()
 
   for(int m: mask)
     cout << m << "\n";
+
+  cout << "##########################\n";
+
+  vector<int> inds(boxes.size());
+  iota(inds.begin(), inds.end(), 0);
+  sort(inds.begin(), inds.end(), [&scores](int a, int b){return scores[a] > scores[b];});
+
+
+
+  thrust::host_vector<float> flat_boxes(4*boxes.size());
+  for(int i=0; i<boxes.size(); ++i)
+  {
+    for(int j=0; j<4; ++j)
+    {
+      flat_boxes[4*i+j]=boxes[inds[i]][j];
+    }
+  }
+  thrust::host_vector<int> cu_mask = nms_cuda(flat_boxes, 0.1, boxes.size());
+  vector<int> unsorted_mask(mask.size());
+
+  for(int i=0; i<mask.size(); ++i)
+    unsorted_mask[inds[i]] = cu_mask[i];
+
+  for(int u: unsorted_mask)
+    cout << u << "\n";
+
 }

@@ -3,13 +3,13 @@
 #include <numeric>
 #include <cmath>
 
-std::vector<int> nms(const std::vector<std::vector<float>> & boxes,
+std::vector<int> nms(const std::vector<std::vector<float> > & boxes,
                      const std::vector<float> & scores,
                      const float thresh)
 {
   const int size = boxes.size();
   std::vector<int> indices(size);
-  std::vector<std::vector<float>> sorted_boxes(size);
+  std::vector<std::vector<float> > sorted_boxes(size);
   std::iota(indices.begin(), indices.end(), 0);
   std::sort(indices.begin(), indices.end(), [&scores](int a, int b){
      return scores[a] > scores[b];});
@@ -39,9 +39,7 @@ std::vector<int> nms(const std::vector<std::vector<float>> & boxes,
     }
     ++pos;
     while(pos < size-1 and mask[pos] == 0)
-    {
-    ++pos;
-    }
+      ++pos;
   }
   std::vector<int> unsorted_mask(size);
   for(int i=0; i<size; ++i)
