@@ -1,4 +1,5 @@
 #include <iostream>
+#include <cassert>
 #include <algorithm>
 #include <vector>
 #include <random>
@@ -15,10 +16,10 @@ thrust::host_vector<int> nms_cuda(thrust::host_vector<float> &boxes,
 
 int main()
 {
-  int nps = 10;
+  int nps = 6000;
   vector<vector<float>> boxes;
   vector<float> scores;
-  default_random_engine e1(0);
+  default_random_engine e1(8);
   normal_distribution<float> jitter(0, 10);
   for(int i=0; i<nps; ++i)
   {
@@ -48,12 +49,10 @@ int main()
     scores.push_back(jitter(e1));
   }
 
-  vector<int> mask = nms(boxes, scores, 0.1);
+  cout << "...\n";
+  vector<int> mask = nms(boxes, scores, 0.9);
+  cout << "...\n";
 
-  for(int m: mask)
-    cout << m << "\n";
-
-  cout << "##########################\n";
 
   vector<int> inds(boxes.size());
   iota(inds.begin(), inds.end(), 0);
@@ -69,13 +68,17 @@ int main()
       flat_boxes[4*i+j]=boxes[inds[i]][j];
     }
   }
-  thrust::host_vector<int> cu_mask = nms_cuda(flat_boxes, 0.1, boxes.size());
+  cout << "...\n";
+  thrust::host_vector<int> cu_mask = nms_cuda(flat_boxes, 0.9, boxes.size());
+  cout << "...\n";
   vector<int> unsorted_mask(mask.size());
 
   for(int i=0; i<mask.size(); ++i)
     unsorted_mask[inds[i]] = cu_mask[i];
 
-  for(int u: unsorted_mask)
-    cout << u << "\n";
+  for(int i=0; i<mask.size(); ++i)
+  {
+    assert(unsorted_mask[i] == mask[i] || cout << i <<" " << mask[i] << "\n");
+  }
 
 }

@@ -4,13 +4,13 @@
 #include <thrust/device_vector.h>
 #include <thrust/device_vector.h>
 
-__device__ __forceinline__ int elim_idx(int x, int y, int n_bxs)
+__device__ __forceinline__ int elim_idx(int x, int y, int n)
 {
-  return x*n_bxs - (x*(x+3))/2 + y - 1;
+  return x <= (n-1)/2? x*(n-1) + y: n*(n-2-x) + y+1;
 }
 
-__global__ void nms_kern(float* boxes, int* elims, int* mask,
-                       float thresh, int n_bxs)
+
+__global__ void calc_elims(float* boxes, int* elims, float thresh, int n_bxs)
 {
 
   int idx = threadIdx.x + blockDim.x * blockIdx.x;
@@ -18,9 +18,20 @@ __global__ void nms_kern(float* boxes, int* elims, int* mask,
   if(idx >= (n_bxs*(n_bxs-1))/2)
     return;
 
+  int base = idx / n_bxs;
+  int midpt = (base+1) * (n_bxs-1);
+  int box_x_idx, box_y_idx;
+  if(idx >= midpt)
+  {
+    box_x_idx = n_bxs-base-2;
+    box_y_idx = idx - midpt + box_x_idx + 1;
+  }
+  else
+  {
+    box_x_idx = base;
+    box_y_idx = idx - midpt + n_bxs;
+  }
 
-  int box_x_idx = n_bxs - static_cast<int>(ceil(0.5 + sqrtf((n_bxs-0.5)*(n_bxs-0.5)-2*idx)));
-  int box_y_idx = idx + 1 - (n_bxs-1)*box_x_idx + ((box_x_idx+1)*box_x_idx)/2;
 
   float box_x[4], box_y[4];
 
@@ -44,41 +55,50 @@ __global__ void nms_kern(float* boxes, int* elims, int* mask,
 
  
   elims[idx] = (iou > thresh) ? 0 : 1;
+}
 
-  __syncthreads();
-
-  if(box_x_idx != 0) 
-    return;
-
-
+__global__ void calc_mask(int* elims, int* mask, int n_bxs)
+{
   int col = 0;
-  while(col < box_y_idx)
+  while(col < n_bxs-1)
   {
-    mask[box_y_idx] *= elims[elim_idx(col, box_y_idx, n_bxs)];
+    for(int i = threadIdx.x; i < n_bxs-1; i+=blockDim.x)
+      if(i >= col)
+        mask[i+1] *= elims[elim_idx(col, i, n_bxs)];
     __syncthreads();
     ++col;
-    while(col < n_bxs - 1 && mask[col] == 0)
+    while((col < n_bxs - 1) && (mask[col] == 0))
       ++col;
   }
-
 }
 
 thrust::host_vector<int> nms_cuda(thrust::host_vector<float> &cpu_boxes, float thresh, int n_boxes)
 {
+  int n_pairs = (n_boxes*(n_boxes-1))/2;
   cudaError_t err;
   thrust::device_vector<float> boxes = cpu_boxes;
   thrust::device_vector<int> mask(n_boxes, 1);
-  thrust::device_vector<int> elims((n_boxes*(n_boxes-1))/2, 1);
-  nms_kern<<<n_boxes, n_boxes>>>(thrust::raw_pointer_cast(boxes.data()),
-                                        thrust::raw_pointer_cast(elims.data()), 
-                                        thrust::raw_pointer_cast(mask.data()),
-                                        thresh, n_boxes);
+  thrust::device_vector<int> elims(n_pairs);
+
+  calc_elims<<<(n_pairs-1+512)/512, 512>>>(thrust::raw_pointer_cast(boxes.data()),
+                                         thrust::raw_pointer_cast(elims.data()), 
+                                         thresh, n_boxes);
   err = cudaGetLastError();
   if (err != cudaSuccess)
   {
-    fprintf(stderr, "CUDA kernel failed : %s\n", cudaGetErrorString(err));
+    fprintf(stderr, "calc elims failed : %s\n", cudaGetErrorString(err));
     exit(-1);
   }
+  calc_mask<<<1, 512>>>(thrust::raw_pointer_cast(elims.data()), 
+                        thrust::raw_pointer_cast(mask.data()),
+                        n_boxes);
+  err = cudaGetLastError();
+  if (err != cudaSuccess)
+  {
+    fprintf(stderr, "calc mask failed : %s\n", cudaGetErrorString(err));
+    exit(-1);
+  }
+  cudaDeviceSynchronize();
   thrust::host_vector<int> output = mask;
   return output;
 }
