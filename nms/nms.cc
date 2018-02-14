@@ -12,11 +12,9 @@ std::vector<int> nms(const std::vector<std::vector<float> > & boxes,
   std::vector<std::vector<float> > sorted_boxes(size);
   std::iota(indices.begin(), indices.end(), 0);
   std::sort(indices.begin(), indices.end(), [&scores](int a, int b){
-     return scores[a] > scores[b];});
-  for(int i=0; i<size; ++i)
-  {
+    return scores[a] > scores[b];});
+  for(int i=0; i<size; ++i) 
     sorted_boxes[i] = boxes[indices[i]];
-  }
   
   std::vector<int> mask(size, 1);
   int pos=0;
@@ -43,8 +41,7 @@ std::vector<int> nms(const std::vector<std::vector<float> > & boxes,
   }
   std::vector<int> unsorted_mask(size);
   for(int i=0; i<size; ++i)
-  {
     unsorted_mask[indices[i]]=mask[i];
-  }
+
   return unsorted_mask;
 }
