@@ -1,3 +1,7 @@
+#include "ATen/NativeFunctions.h"
+
+#include <tuple>
+
 namespace at {
 namespace native {
 
@@ -15,18 +19,18 @@ __device__ __forceinline__ int elim_idx(int x, int y, int n)
 {
   // Calculate an index into the boolean array "elims". The
   // array specifies which boxes are to be eliminated:
-  // elims[elim_idx(x, y, n)] = false if box x eliminates box y,
-  // true otherwise. n is the total number of boxes.
+  // elims[elim_idx(x, y, n)] = 0 if box x eliminates box y,
+  // 1 otherwise. n is the total number of boxes.
   return x <= (n-1)/2? x*(n-1) + y: n*(n-2-x) + y+1;
 }
 
 template <typename T>
 __global__ void nms_elims_kernel(
   const T *boxes,
-  const T *sorted_idx,
-  bool *elims,
-  float thresh,
-  int num_boxes)
+  const int64_t *sorted_idx,
+  unsigned char *elims,
+  const float thresh,
+  const int64_t num_boxes)
 {
   // For each pair of boxes, determine whether the higher-scoring box
   // eliminates the lower-scoring one. Store this information in the array
@@ -47,13 +51,17 @@ __global__ void nms_elims_kernel(
   int box_x_idx, box_y_idx;
   if(idx >= midpt)
   {
-    box_x_idx = sorted_idx[num_boxes - base - 2 + num_boxes * blockIdx.y];
-    box_y_idx = sorted_idx[idx - midpt + box_x_idx + 1 num_boxes * blockIdx.y];
+    box_x_idx = num_boxes - base - 2 + num_boxes * blockIdx.y;
+    box_x_idx = sorted_idx[box_x_idx];
+    box_y_idx = idx - midpt + box_x_idx + 1 + num_boxes * blockIdx.y;
+    box_y_idx = sorted_idx[box_y_idx];
   }
   else
   {
-    box_x_idx = sorted_idx[base + batch_shift + num_boxes * blockIdx.y];
-    box_y_idx = sorted_idx[idx - midpt + num_boxes + num_boxes * blockIdx.y];
+    box_x_idx = base + batch_shift + num_boxes * blockIdx.y;
+    box_x_idx = sorted_idx[box_x_idx];
+    box_y_idx = idx - midpt + num_boxes + num_boxes * blockIdx.y;
+    box_y_idx = sorted_idx[box_y_idx];
   }
 
   float box_x[4], box_y[4];
@@ -77,12 +85,13 @@ __global__ void nms_elims_kernel(
 
   float iou = delta_x * delta_y / (uni - delta_x * delta_y);
 
-  // Write false if box x eliminates box y.
-  elims[sorted_idx[dx + batch_shift]] = (iou <= thresh);
+  // Write 0 if box x eliminates box y.
+  if (iou > thresh)
+    elims[sorted_idx[idx + batch_shift]] = 0;
 
 }
 
-__global__ void nms_mask_kernel(Tensor *mask, bool* elims, int num_boxes)
+__global__ void nms_mask_kernel(unsigned char *mask, unsigned char *elims, int64_t num_boxes)
 {
   // Given "elims", calculate the mask. Unfortunately this
   // requires global synchronisation, so launch only one block
@@ -93,21 +102,19 @@ __global__ void nms_mask_kernel(Tensor *mask, bool* elims, int num_boxes)
   {
     for(int i = threadIdx.x; i < num_boxes-1; i+=blockDim.x)
       if(i >= col)
-        mask[i+1+blockIdx.y*num_boxes] = (
-           mask[i+1+blockIdx.y*num_boxes] ?
-           elims[elim_idx(col, i, num_boxes)+batch_shift] : false);
+        mask[i+1+blockIdx.y*num_boxes] *= elims[elim_idx(col, i, num_boxes)+batch_shift];
     __syncthreads();
     ++col;
-    while((col < num_boxes - 1) && (mask[col+blockIdx.y] == 0))
+    while((col < num_boxes - 1) && !mask[col+blockIdx.y])
       ++col;
   }
 }
 
-std::tuple<Tensor, Tensor> NonMaxSuppression_cuda(const Tensor& input, const Tensor& scores, const float thresh)
+std::tuple<Tensor, Tensor> non_max_suppression_cuda(const Tensor& input, const Tensor& scores, const double thresh)
 {
 
   AT_ASSERT(input.ndimension() == 3, "First argument should be a 3D Tensor, (batch_sz x n_boxes x 4)");
-  AT_ASSERT(scores.ndimension() == 4, "Second argument should be a 2D Tensor, (batch_sz x n_boxes)");
+  AT_ASSERT(scores.ndimension() == 2, "Second argument should be a 2D Tensor, (batch_sz x n_boxes)");
   AT_ASSERT(input.size(0) == scores.size(0), "First and second arguments must have equal-sized first dimension");
   AT_ASSERT(input.size(1) == scores.size(1), "First and second arguments must have equal-sized second dimension");
   AT_ASSERT(input.size(2) == 4, "First argument dimension 2 must have size 4, and should be of the form [x, y, w, h]");
@@ -118,29 +125,31 @@ std::tuple<Tensor, Tensor> NonMaxSuppression_cuda(const Tensor& input, const Ten
   auto num_boxes = input.size(1);
   auto batch_size = input.size(0);
   auto mask = input.type().toScalarType(kByte).tensor({batch_size, num_boxes});
+  mask.fill_(1);
   int n_pairs = (num_boxes*(num_boxes-1))/2;
   
-  bool *elims;
-  cudaMalloc(elims, n_pairs*batch_size*sizeof(bool));
-  AT_ASSERT(cudaGetLastError() == cudaSuccess, "Failed to allocate memory for NonMaxSuppression");
+  unsigned char *elims;
+  cudaMalloc(&elims, n_pairs*batch_size*sizeof(bool));
+  AT_ASSERT(cudaGetLastError() == cudaSuccess, "Failed to allocate memory for non_max_suppression");
 
   //need the indices of the boxes sorted by score.
-  std::tuple<Tensor, Tensor> scores_and_inds = scores.sort(-1, true);
+  Tensor sorted_inds = std::get<1>(scores.sort(-1, true));
 
 
-  dim3 block(512);
-  dim3 grid((n_paris-1+512)/512, batch_size);
-  calc_elims<<<grid, block, 0, globalContext().getCurrentCUDAStream()>>>(
-                                                 boxes.data<float>(),
+  dim3 elims_block(512);
+  dim3 elims_grid((n_pairs-1+512)/512, batch_size);
+  nms_elims_kernel<<<elims_grid, elims_block, 0, globalContext().getCurrentCUDAStream()>>>(
+                                                 input.data<float>(),
+                                                 sorted_inds.data<int64_t>(),
                                                  elims, 
                                                  thresh,
                                                  num_boxes);
   AT_ASSERT(cudaGetLastError() == cudaSuccess, "nms_elims_kernel failed");
-  dim3 block(512);
-  dim3 grid(batch_size);
-  calc_mask<<<grid, block, 0, globalContext().getCurrentCUDAStream()>>>(
-                                    *elims, 
-                                    mask.data<bool>,
+  dim3 mask_block(512);
+  dim3 mask_grid(batch_size);
+  nms_mask_kernel<<<mask_grid, mask_block, 0, globalContext().getCurrentCUDAStream()>>>(
+                                    elims, 
+                                    mask.data<unsigned char>(),
                                     num_boxes);
   AT_ASSERT(cudaGetLastError() == cudaSuccess, "nms_mask_kernel failed");
 
@@ -149,5 +158,7 @@ std::tuple<Tensor, Tensor> NonMaxSuppression_cuda(const Tensor& input, const Ten
   //way of returning the surving boxes/indices as a tensor. Returning a mask on the
   //sorted boxes together with the sorted indices seems reasonable; that way, the user
   //can easily take the N highest-scoring surviving boxes to form a tensor if they wish. 
-  return std::make_tuple(mask, std::get<1>(scores_and_inds));
+  return std::make_tuple(mask, sorted_inds);
 }
+
+}}
