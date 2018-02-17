@@ -21,8 +21,9 @@ __device__ __forceinline__ int elim_idx(int x, int y, int n)
 }
 
 template <typename T>
-__global__ void nms_forward_elims_kernel(
-  const T *boxes, 
+__global__ void nms_elims_kernel(
+  const T *boxes,
+  const T *sorted_idx,
   bool *elims,
   float thresh,
   int num_boxes)
@@ -46,13 +47,13 @@ __global__ void nms_forward_elims_kernel(
   int box_x_idx, box_y_idx;
   if(idx >= midpt)
   {
-    box_x_idx = num_boxes - base - 2 + num_boxes * blockIdx.y;
-    box_y_idx = idx - midpt + box_x_idx + 1 num_boxes * blockIdx.y;
+    box_x_idx = sorted_idx[num_boxes - base - 2 + num_boxes * blockIdx.y];
+    box_y_idx = sorted_idx[idx - midpt + box_x_idx + 1 num_boxes * blockIdx.y];
   }
   else
   {
-    box_x_idx = base + batch_shift + num_boxes * blockIdx.y;
-    box_y_idx = idx - midpt + num_boxes + num_boxes * blockIdx.y;
+    box_x_idx = sorted_idx[base + batch_shift + num_boxes * blockIdx.y];
+    box_y_idx = sorted_idx[idx - midpt + num_boxes + num_boxes * blockIdx.y];
   }
 
   float box_x[4], box_y[4];
@@ -77,11 +78,11 @@ __global__ void nms_forward_elims_kernel(
   float iou = delta_x * delta_y / (uni - delta_x * delta_y);
 
   // Write false if box x eliminates box y.
-  elims[idx + batch_shift] = (iou <= thresh);
+  elims[sorted_idx[dx + batch_shift]] = (iou <= thresh);
 
 }
 
-__global__ void nms_forward_mask_kernel(Tensor *mask, bool* elims, int num_boxes)
+__global__ void nms_mask_kernel(Tensor *mask, bool* elims, int num_boxes)
 {
   // Given "elims", calculate the mask. Unfortunately this
   // requires global synchronisation, so launch only one block
@@ -102,7 +103,7 @@ __global__ void nms_forward_mask_kernel(Tensor *mask, bool* elims, int num_boxes
   }
 }
 
-Tensor NonMaxSupression_forward_cuda(const Tensor& input, const Tensor& scores, float thresh)
+std::tuple<Tensor, Tensor> NonMaxSuppression_cuda(const Tensor& input, const Tensor& scores, const float thresh)
 {
 
   AT_ASSERT(input.ndimension() == 3, "First argument should be a 3D Tensor, (batch_sz x n_boxes x 4)");
@@ -123,6 +124,10 @@ Tensor NonMaxSupression_forward_cuda(const Tensor& input, const Tensor& scores, 
   cudaMalloc(elims, n_pairs*batch_size*sizeof(bool));
   AT_ASSERT(cudaGetLastError() == cudaSuccess, "Failed to allocate memory for NonMaxSuppression");
 
+  //need the indices of the boxes sorted by score.
+  std::tuple<Tensor, Tensor> scores_and_inds = scores.sort(-1, true);
+
+
   dim3 block(512);
   dim3 grid((n_paris-1+512)/512, batch_size);
   calc_elims<<<grid, block, 0, globalContext().getCurrentCUDAStream()>>>(
@@ -130,14 +135,19 @@ Tensor NonMaxSupression_forward_cuda(const Tensor& input, const Tensor& scores, 
                                                  elims, 
                                                  thresh,
                                                  num_boxes);
-  AT_ASSERT(cudaGetLastError() == cudaSuccess, "nms_forward_elims_kernel failed");
+  AT_ASSERT(cudaGetLastError() == cudaSuccess, "nms_elims_kernel failed");
   dim3 block(512);
   dim3 grid(batch_size);
   calc_mask<<<grid, block, 0, globalContext().getCurrentCUDAStream()>>>(
                                     *elims, 
                                     mask.data<bool>,
                                     num_boxes);
-  AT_ASSERT(cudaGetLastError() == cudaSuccess, "nms_forward_mask_kernel failed");
+  AT_ASSERT(cudaGetLastError() == cudaSuccess, "nms_mask_kernel failed");
 
-  return mask;
+  //It's not entirely clear what the best thing to return is here. The algorithm will
+  //produce a different number of boxes for each batch, so there is no obvious way of
+  //way of returning the surving boxes/indices as a tensor. Returning a mask on the
+  //sorted boxes together with the sorted indices seems reasonable; that way, the user
+  //can easily take the N highest-scoring surviving boxes to form a tensor if they wish. 
+  return std::make_tuple(mask, std::get<1>(scores_and_inds));
 }
