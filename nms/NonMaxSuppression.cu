@@ -38,7 +38,6 @@ __global__ void nms_elims_kernel(
 
   // Use a flat index so that we have only batch_size underutilised blocks.
   int idx = threadIdx.x + blockDim.x * blockIdx.x;
-  int batch_shift = gridDim.x * blockDim.x * blockIdx.y;
 
   if(idx >= (num_boxes*(num_boxes-1))/2) // number of pairs
     return;
@@ -58,7 +57,7 @@ __global__ void nms_elims_kernel(
   }
   else
   {
-    box_x_idx = base + batch_shift + num_boxes * blockIdx.y;
+    box_x_idx = base + num_boxes * blockIdx.y;
     box_x_idx = sorted_idx[box_x_idx];
     box_y_idx = idx - midpt + num_boxes + num_boxes * blockIdx.y;
     box_y_idx = sorted_idx[box_y_idx];
@@ -86,8 +85,9 @@ __global__ void nms_elims_kernel(
   float iou = delta_x * delta_y / (uni - delta_x * delta_y);
 
   // Write 0 if box x eliminates box y.
+  int batch_shift = (num_boxes*(num_boxes-1))/2*blockIdx.y;
   if (iou > thresh)
-    elims[sorted_idx[idx + batch_shift]] = 0;
+    elims[elim_idx(box_x_idx, box_y_idx, num_boxes) + batch_shift] = 0;
 
 }
 
@@ -97,15 +97,15 @@ __global__ void nms_mask_kernel(unsigned char *mask, unsigned char *elims, int64
   // requires global synchronisation, so launch only one block
   // per batch element and use a for loop to cover all the boxes.
   int col = 0;
-  int batch_shift = (num_boxes*(num_boxes-1))/2*blockIdx.y;
+  int batch_shift = (num_boxes*(num_boxes-1))/2*blockIdx.x;
   while(col < num_boxes-1)
   {
     for(int i = threadIdx.x; i < num_boxes-1; i+=blockDim.x)
       if(i >= col)
-        mask[i+1+blockIdx.y*num_boxes] *= elims[elim_idx(col, i, num_boxes)+batch_shift];
+        mask[i+1+blockIdx.x*num_boxes] *= elims[elim_idx(col, i, num_boxes)+batch_shift];
     __syncthreads();
     ++col;
-    while((col < num_boxes - 1) && !mask[col+blockIdx.y])
+    while((col < num_boxes - 1) && mask[col+blockIdx.x*num_boxes]==0)
       ++col;
   }
 }
@@ -148,8 +148,8 @@ std::tuple<Tensor, Tensor> non_max_suppression_cuda(const Tensor& input, const T
   dim3 mask_block(512);
   dim3 mask_grid(batch_size);
   nms_mask_kernel<<<mask_grid, mask_block, 0, globalContext().getCurrentCUDAStream()>>>(
-                                    elims, 
                                     mask.data<unsigned char>(),
+                                    elims,
                                     num_boxes);
   AT_ASSERT(cudaGetLastError() == cudaSuccess, "nms_mask_kernel failed");
 
