@@ -19,7 +19,7 @@ boxes_np, scores_np = generate_test_data(args.centroids, args.per_centroid, args
 boxes = Variable(torch.Tensor(boxes_np)).cuda()
 scores = Variable(torch.Tensor(scores_np)).cuda()
 
-gpu_mask, gpu_inds = torch._C._VariableFunctions.non_max_suppression(boxes, scores, args.thresh)
+gpu_mask, gpu_inds = torch.nn.functional.non_max_suppression(boxes, scores, args.thresh)
 
 pyres = []
 for i in range(args.batch_size):
@@ -30,9 +30,17 @@ for i in range(args.batch_size):
 boxes = Variable(torch.Tensor(boxes_np))
 scores = Variable(torch.Tensor(scores_np))
 
-mask, inds = torch._C._VariableFunctions.non_max_suppression(boxes, scores, args.thresh)
+mask, inds = torch.nn.functional.non_max_suppression(boxes, scores, args.thresh)
 
 for i in range(args.batch_size):
-    assert np.array_equal(pyres[i], inds[i][mask[i]].cpu().data.numpy())
+    assert np.array_equal(pyres[i], inds[i][mask[i]].data.numpy())
     assert np.array_equal(pyres[i], gpu_inds[i][gpu_mask[i]].cpu().data.numpy())
+
+nms = torch.nn.NonMaxSuppression(args.thresh)
+
+mask, inds = nms(boxes, scores)
+
+for i in range(args.batch_size):
+    assert np.array_equal(pyres[i], inds[i][mask[i]].data.numpy())
+
 print("OK")
